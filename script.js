@@ -62,6 +62,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const quickCalcFilesInput = document.getElementById("quick-calc-files");
   const quickCalcDropzone = document.getElementById("quick-calc-dropzone");
   const quickCalcFilesList = document.getElementById("quick-calc-files-list");
+  // FormSubmit: free tier supports uploads, total <= 10MB (sum of files).
+  const QUICK_CALC_ALLOW_ATTACHMENTS = true;
+  const QUICK_CALC_MAX_TOTAL_BYTES = 10 * 1024 * 1024; // 10 MB total
 
   const formatFileList = (files) => {
     if (!files || files.length === 0) return "";
@@ -83,8 +86,34 @@ document.addEventListener("DOMContentLoaded", () => {
     quickCalcFilesList.classList.remove("hidden");
   };
 
+  const getTotalSize = (files) => {
+    if (!files || files.length === 0) return 0;
+    let total = 0;
+    for (let i = 0; i < files.length; i += 1) total += files[i].size || 0;
+    return total;
+  };
+
+  const validateQuickCalcFiles = (files) => {
+    if (!files) return null;
+    if (!QUICK_CALC_ALLOW_ATTACHMENTS && files.length > 0) {
+      return "Отправка файлов недоступна на бесплатном тарифе. Оставьте контакты без вложений.";
+    }
+    const totalBytes = getTotalSize(files);
+    if (totalBytes > QUICK_CALC_MAX_TOTAL_BYTES) {
+      return "Файлы слишком большие. Максимальный общий размер вложений: 10 МБ.";
+    }
+    return null;
+  };
+
   if (quickCalcFilesInput) {
-    quickCalcFilesInput.addEventListener("change", renderQuickCalcFiles);
+    quickCalcFilesInput.addEventListener("change", () => {
+      const err = validateQuickCalcFiles(quickCalcFilesInput.files);
+      if (err) {
+        setStatus("quick-calc-status", err, "error");
+        quickCalcFilesInput.value = "";
+      }
+      renderQuickCalcFiles();
+    });
   }
 
   if (quickCalcDropzone && quickCalcFilesInput) {
@@ -119,54 +148,80 @@ document.addEventListener("DOMContentLoaded", () => {
       const dt = e.dataTransfer;
       if (!dt || !dt.files) return;
       quickCalcFilesInput.files = dt.files;
+      const err = validateQuickCalcFiles(quickCalcFilesInput.files);
+      if (err) {
+        setStatus("quick-calc-status", err, "error");
+        quickCalcFilesInput.value = "";
+      }
       renderQuickCalcFiles();
     });
   }
 
-  const sendViaMailClient = (subjectText, bodyText) => {
-    const subject = encodeURIComponent(subjectText);
-    const body = encodeURIComponent(bodyText);
-    window.location.href = `mailto:elbos@tut.by?subject=${subject}&body=${body}`;
+  const setStatus = (id, text, tone) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove("hidden");
+    el.classList.toggle("text-green-300", tone === "ok");
+    el.classList.toggle("text-red-300", tone === "error");
+    el.classList.toggle("text-slate-300", tone === "info");
+  };
+
+  const submitToEndpoint = async (form, statusId) => {
+    const action = form.getAttribute("action");
+    if (!action) throw new Error("No form action URL");
+
+    const formData = new FormData(form);
+    const res = await fetch(action, {
+      method: "POST",
+      body: formData,
+      headers: { Accept: "application/json" },
+    });
+
+    if (res.ok) return;
+    let msg = "Не удалось отправить. Попробуйте еще раз.";
+    try {
+      const data = await res.json();
+      if (data && data.errors && data.errors.length) {
+        msg = data.errors.map((e) => e.message).join("; ");
+      }
+    } catch (_) {
+      // ignore
+    }
+    setStatus(statusId, msg, "error");
+    throw new Error(msg);
   };
 
   forms.forEach((form) => {
     form.addEventListener("submit", (e) => {
       e.preventDefault();
 
-      if (form.id === "engineer-form") {
-        const nameEl = form.elements.namedItem("name");
-        const phoneEl = form.elements.namedItem("phone");
-        const commentEl = form.elements.namedItem("comment");
-        const name = (nameEl && nameEl.value ? nameEl.value : "").trim();
-        const phone = (phoneEl && phoneEl.value ? phoneEl.value : "").trim();
-        const comment = (commentEl && commentEl.value ? commentEl.value : "").trim();
+      const isEngineer = form.id === "engineer-form";
+      const statusId = isEngineer ? "engineer-status" : "quick-calc-status";
 
-        sendViaMailClient(
-          "Заявка: заказать звонок",
-          `Новая заявка на звонок\n\nИмя: ${name}\nТелефон: ${phone}\nКомментарий: ${comment || "-"}`
-        );
-      } else {
-        const nameEl = form.elements.namedItem("name");
-        const phoneEl = form.elements.namedItem("phone");
-        const systemEl = form.elements.namedItem("system");
-        const name = (nameEl && nameEl.value ? nameEl.value : "").trim();
-        const phone = (phoneEl && phoneEl.value ? phoneEl.value : "").trim();
-        const system = (systemEl && systemEl.value ? systemEl.value : "").trim();
-        const filesText = formatFileList(quickCalcFilesInput && quickCalcFilesInput.files ? quickCalcFilesInput.files : null);
-
-        sendViaMailClient(
-          "Заявка: рассчитать стоимость",
-          `Новая заявка на расчет стоимости\n\nИмя: ${name}\nТелефон: ${phone}\nСистема: ${system || "-"}\nФайлы: ${filesText || "-"}`
-        );
+      if (!isEngineer && quickCalcFilesInput && quickCalcFilesInput.files) {
+        const err = validateQuickCalcFiles(quickCalcFilesInput.files);
+        if (err) {
+          setStatus(statusId, err, "error");
+          return;
+        }
       }
 
-      alert("Открылось письмо для отправки на elbos@tut.by. Подтвердите отправку в вашей почтовой программе.");
-      form.reset();
-      if (form.id === "quick-calc-form" && quickCalcFilesInput) {
-        quickCalcFilesInput.value = "";
-        renderQuickCalcFiles();
-      }
-      closeModal();
+      setStatus(statusId, "Отправляем…", "info");
+
+      submitToEndpoint(form, statusId)
+        .then(() => {
+          setStatus(statusId, "Отправлено. Мы свяжемся с вами.", "ok");
+          form.reset();
+          if (!isEngineer && quickCalcFilesInput) {
+            quickCalcFilesInput.value = "";
+            renderQuickCalcFiles();
+          }
+          if (isEngineer) closeModal();
+        })
+        .catch(() => {
+          // status already set
+        });
     });
   });
 });
